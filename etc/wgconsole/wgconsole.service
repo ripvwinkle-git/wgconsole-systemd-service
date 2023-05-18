@@ -1,0 +1,13 @@
+[Unit]
+Description=Wireguard control console service
+After=multi-user.target
+
+[Service]
+Type=simple
+Restart=always
+User=root
+ExecStart=/bin/python3 /usr/wgconsole/wgconsole.py
+
+[Install]
+WantedBy=multi-user.target
+
