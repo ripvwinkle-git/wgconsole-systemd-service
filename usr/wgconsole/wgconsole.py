@@ -1,137 +1,141 @@
-#!/usr/bin/env python3.10
+#!/usr/bin/env python3
+
 '''
 Systemd service for managing wireguard interfaces and database.
 '''
 
 import os
 import re
-import sys
 import subprocess
 import shlex
-import time
 import logging
-import logging.config
+import ipaddress
 import psycopg2
 
 logger = logging.getLogger(__name__)
 
-class WgControl:
+def db_read(
+    connection, # psycopg2 database connection object
+    command:str
+) -> tuple:
     '''
-    Class for controlling wireguard interfaces and databases.
+    Read records from PostgreSQL database table.
+    '''
+    with connection as conn:
+        with conn.cursor() as curr:
+            try:
+                curr.execute(command)
+                records = tuple(curr)
+                logger.debug(
+                    'Reading records from database'
+                    '\nCommand:\n%s\n'
+                    'Result:\n%s\n\n',
+                    command, records
+                )
+                return records
+            except psycopg2.ProgrammingError as exception:
+                logger.error(
+                    'Error reading from database'
+                    '\nCommand:\n%s\n%s\n\n',
+                    command, exception
+                )
+                return tuple()
+
+def db_write(
+    connection, # psycopg2 database connection object
+    command:str
+) -> None:
+    '''
+    Write records to PostgreSQL database table.
+    '''
+    with connection as conn:
+        with conn.cursor() as curw:
+            try:
+                curw.execute(command)
+                logger.debug(
+                    'Writing records to database'
+                    '\nCommand:\n%s\n\n', command
+                )
+            except psycopg2.ProgrammingError as exception:
+                logger.error(
+                    'Error writing to database'
+                    '\nCommand:\n%s\n%s\n\n',
+                    command, exception
+                )
+
+def run_cmmd(
+    command: str,
+    input_str: str = None,
+    logerr: bool = False
+) -> str:
+    '''
+    Subprocess module wrapper
+    '''
+    try:
+        process = subprocess.run(
+            shlex.split(command),
+            input = input_str,
+            capture_output=True,
+            encoding='UTF-8',
+            timeout=5,
+            check=True
+        )
+        logger.debug(
+            'Process complited'
+            '\nCommand:\n%s\nstdout:\n%s\n\n',
+            command, process.stdout
+        )
+        if process.stdout:
+            return process.stdout
+        return False
+    except FileNotFoundError as exception:
+        logger.debug(
+            'Process failed, executable could not be found'
+            '\nCommand:\n%s\n%s\n\n',
+            command, exception
+        )
+        return False
+    except subprocess.CalledProcessError as exception:
+        if logerr:
+            logger.error(
+                'Process failed because did not return a successful '
+                'return code'
+                '\nCommand:\n%s\nReturned: %s\n%s\n\n',
+                command, exception.returncode, exception.stderr
+            )
+        return False
+    except subprocess.TimeoutExpired as exception:
+        logger.error(
+            'Process timed out'
+            '\nCommand:\n%s\n%s\n\n',
+            command, exception
+        )
+        return False
+
+class WgState:
+    '''
+    Class for retrieve actual interface state and update it in db. 
     '''
 
     wgstate = {}
 
-    def __init__(self, conf:str, conn) -> None:
-        self.conf = os.fspath(conf)
+    def __init__(self, conn) -> None:
         self.conn = conn
 
-    def db_read(self, command:str) -> tuple:
-        '''
-        Read records from database table.
-        '''
-        with self.conn as conn:
-            with conn.cursor() as curr:
-                try:
-                    curr.execute(command)
-                    records = tuple(curr)
-                    logger.debug(
-                        'Reading records from database'
-                        '\nCommand:\n%s\n'
-                        'Result:\n%s\n\n',
-                        command, records
-                    )
-                    return records
-                except psycopg2.ProgrammingError as exception:
-                    logger.error(
-                        'Error reading from database'
-                        '\nCommand:\n%s\n%s\n\n',
-                        command, exception
-                    )
-                    return tuple()
-
-    def db_write(self, command:str):
-        '''
-        Write records to database table.
-        '''
-        with self.conn as conn:
-            with conn.cursor() as curw:
-                try:
-                    curw.execute(command)
-                    logger.debug(
-                        'Writing records to database'
-                        '\nCommand:\n%s\n\n', command
-                    )
-                except psycopg2.ProgrammingError as exception:
-                    logger.error(
-                        'Error writing to database'
-                        '\nCommand:\n%s\n%s\n\n',
-                        command, exception
-                    )
-
-    @staticmethod
-    def run_command(
-        command: str,
-        input_str: str = None,
-        logerr: bool = False
-    ) -> str:
-        '''
-        Subprocess module wrapper
-        '''
-        try:
-            process = subprocess.run(
-                shlex.split(command),
-                input = input_str,
-                capture_output=True,
-                encoding='UTF-8',
-                timeout=5,
-                check=True
-            )
-            logger.debug(
-                'Process complited'
-                '\nCommand:\n%s\nstdout:\n%s\n\n',
-                command, process.stdout
-            )
-            if process.stdout:
-                return process.stdout
-            return False
-        except FileNotFoundError as exception:
-            logger.debug(
-                'Process failed, executable could not be found'
-                '\nCommand:\n%s\n%s\n\n',
-                command, exception
-            )
-            return False
-        except subprocess.CalledProcessError as exception:
-            if logerr:
-                logger.error(
-                    'Process failed because did not return a successful '
-                    'return code'
-                    '\nCommand:\n%s\nReturned: %s\n%s\n\n',
-                    command, exception.returncode, exception.stderr
-                )
-            return False
-        except subprocess.TimeoutExpired as exception:
-            logger.error(
-                'Process timed out'
-                '\nCommand:\n%s\n%s\n\n',
-                command, exception
-            )
-            return False
-
-    def state_interface(self):
+    def update_interface(self) -> None:
         '''
         Update state information about interfaces.
         '''
-        logger.debug('Execute state_interface!\n%s\n\n', '*'*80)
+        logger.debug('Execute WgState.update_interface\n%s\n\n', '*'*80)
         self.wgstate = {}
-        records = self.db_read(
+        records = db_read(
+            self.conn,
             'SELECT name, state\n'
             'FROM wgconsole_interface;'
         )
         for record in records:
             name, state = record
-            wgshow = self.run_command(
+            wgshow = run_cmmd(
                 f'wg show {name}'
             )
             if wgshow:
@@ -158,7 +162,8 @@ class WgControl:
                 showed_state = False
                 peers = {}
             if showed_state != state:
-                self.db_write(
+                db_write(
+                    self.conn,
                     'UPDATE wgconsole_interface\n'
                     f'SET state = \'{showed_state}\'\n'
                     f'WHERE name = \'{name}\';'
@@ -169,16 +174,18 @@ class WgControl:
                 }}
             )
         logger.debug(
-            'End of state_interface executing, wgstate variable contains:\n%s\n\n',
+            'End of WgState.update_interface executing, '
+            'wgstate variable contains:\n%s\n\n',
             self.wgstate
         )
 
-    def state_peer(self):
+    def update_peer(self) -> None:
         '''
         Update state information about peers.
         '''
-        logger.debug('Execute state_peer!\n%s\n\n', '*'*80)
-        records = self.db_read(
+        logger.debug('Execute WgState.update_peer\n%s\n\n', '*'*80)
+        records = db_read(
+            self.conn,
             'SELECT public_key, state\n'
             'FROM wgconsole_peer;'
         )
@@ -194,26 +201,46 @@ class WgControl:
                     in peers[peer]
                     ])
                 if peer_state != db_peers[peer]:
-                    self.db_write(
+                    db_write(
+                        self.conn,
                         'UPDATE wgconsole_peer\n'
                         f'SET state = \'{peer_state}\'\n'
                         f'WHERE public_key = \'{peer}\';'
                     )
         for peer in db_peers:
             if peer not in all_active_peers and db_peers[peer] != '':
-                self.db_write(
+                db_write(
+                    self.conn,
                     'UPDATE wgconsole_peer\n'
                     f'SET state = \'\'\n'
                     f'WHERE public_key = \'{peer}\';'
                 )
-        logger.debug('End of executing state_peer!\n\n')
+        logger.debug('End of executing WgState.update_peer\n\n')
 
-    def conf_setup(self):
+    def update(self) -> None:
+        '''
+        Update state information about interfaces and peers.
+        '''
+        self.update_interface()
+        self.update_peer()
+
+class WgSetup:
+    '''
+    Class for updating interface settings in db according to .conf file
+    '''
+
+    def __init__(self, state:WgState, conf:str) -> None:
+        self.wgstate = state.wgstate
+        self.conf = os.fspath(conf)
+        self.conn = state.conn
+
+    def conf_setup(self) -> None:
         '''
         Update interface settings in db according to .conf file
         '''
-        logger.debug('Execute conf_setup!\n%s\n\n', '*'*80)
-        records = self.db_read(
+        logger.debug('Execute WgSetup.conf_setup\n%s\n\n', '*'*80)
+        records = db_read(
+            self.conn,
             'SELECT name, address, port, public_key\n'
             'FROM wgconsole_interface;'
         )
@@ -244,83 +271,110 @@ class WgControl:
                     )
                 continue
             if 'Address' in conf:
-                if conf['Address'] != address:
-                    self.db_write(
+                try:
+                    conf_address = str(ipaddress.ip_network(conf['Address']))
+                    if conf_address != address:
+                        db_write(
+                        self.conn,
                         'UPDATE wgconsole_interface\n'
                         f'SET address = \'{conf["Address"]}\'\n'
                         f'WHERE name = \'{name}\';'
+                        )
+                except ValueError:
+                    logger.error(
+                    'Address record in %s.conf is not correct\n',
+                    name
                     )
             else:
                 logger.error(
-                    'No Address record in %s.conf file\n',
+                    'No Address record in %s.conf\n',
                     name
                 )
             if 'ListenPort' in conf:
                 try:
-                    if int(conf['ListenPort']) != port:
-                        self.db_write(
-                            'UPDATE wgconsole_interface\n'
-                            f'SET port = \'{conf["ListenPort"]}\'\n'
-                            f'WHERE name = \'{name}\';'
+                    conf_port = int(conf['ListenPort'])
+                    if 0 <= conf_port <= 65536:
+                        if conf_port != port:
+                            db_write(
+                                self.conn,
+                                'UPDATE wgconsole_interface\n'
+                                f'SET port = \'{conf["ListenPort"]}\'\n'
+                                f'WHERE name = \'{name}\';'
+                            )
+                    else:
+                        logger.error(
+                            'ListenPort record in %s.conf out of range\n',
+                            name
                         )
                 except ValueError:
                     logger.error(
-                        'ListenPort record value in %s.conf file not'
-                        ' integer\n',
+                        'ListenPort record in %s.conf not integer\n',
                         name
                     )
             else:
                 logger.error(
-                    'No ListenPort record in %s.conf file\n',
+                    'No ListenPort record in %s.conf\n',
                     name
                 )
             if 'PrivateKey' in conf:
                 private_key = conf['PrivateKey']
-                pubkey = self.run_command(
+                pubkey = run_cmmd(
                     'wg pubkey',
-                    input_str=f'{private_key}'
+                    input_str = f'{private_key}',
+                    logerr = True
                 )
-                pubkey = pubkey.rstrip('\n')
-                if pubkey != public_key:
-                    self.db_write(
-                        'UPDATE wgconsole_interface\n'
-                        f'SET public_key = \'{pubkey}\'\n'
-                        f'WHERE name = \'{name}\';'
-                    )
+                if pubkey is not False:
+                    pubkey = pubkey.rstrip('\n')
+                    if pubkey != public_key:
+                        db_write(
+                            self.conn,
+                            'UPDATE wgconsole_interface\n'
+                            f'SET public_key = \'{pubkey}\'\n'
+                            f'WHERE name = \'{name}\';'
+                        )
             else:
                 logger.error(
-                    'No PrivateKey record in %s.conf file\n',
+                    'No PrivateKey record in %s.conf\n',
                     name
                 )
-        logger.debug('End of executing conf_setup!\n\n')
+        logger.debug('End of executing WgSetup.conf_setup\n\n')
 
-    def update(self):
+class WgControl:
+    '''
+    Class for managing Wireguard interfaces.
+    '''
+
+    def __init__(self, state:WgState, conf:str) -> None:
+        self.wgstate = state.wgstate
+        self.conn = state.conn
+        self.conf = os.fspath(conf)
+
+    def update(self) -> None:
         '''
-        Update interfaces.
+        Update Wireguard interfaces according state and status in db.
         '''
-        logger.debug('Execute update!\n%s\n\n', '*'*80)
-        self.state_interface()
-        self.state_peer()
-        self.conf_setup()
-        interface_records = self.db_read(
+        logger.debug('Execute WgControl.update\n%s\n\n', '*'*80)
+        interface_records = db_read(
+            self.conn,
             'SELECT name, status, state\n'
             'FROM wgconsole_interface;'
         )
         for record in interface_records:
             name, status, state = record
             if state is False and status is True:
-                self.run_command(
+                run_cmmd(
                     f'wg-quick up {self.conf}/{name}.conf',
                     logerr=True,
                 )
             if state is True and status is False:
-                self.run_command(
+                run_cmmd(
                     f'wg-quick down {self.conf}/{name}.conf',
                     logerr=True,
                 )
             if status is False:
                 continue
-            peer_records = self.db_read(
+            peer_records = db_read(
+                self.conn,
                 'SELECT public_key, allowed_ips, status\n'
                 'FROM wgconsole_peer\n'
                 f'WHERE interface_id = \'{name}\';'
@@ -333,100 +387,29 @@ class WgControl:
             for record in peer_records:
                 public_key, allowed_ips, peer_status = record
                 if public_key not in peers and peer_status is True:
-                    self.run_command(
+                    run_cmmd(
                         f'wg set {name} peer {public_key} '
                         f'allowed-ips {allowed_ips}'
                     )
-                    self.run_command(
+                    run_cmmd(
                         f'ip -4 route add {allowed_ips} dev {name}'
                     )
                 if public_key in peers and peer_status is False:
-                    self.run_command(
+                    run_cmmd(
                         f'wg set {name} peer {public_key} remove'
                     )
-                    self.run_command(
+                    run_cmmd(
                         f'ip -4 route del {allowed_ips} dev {name}'
                     )
                 if public_key in peers:
                     peers.remove(public_key)
             for public_key in peers:
-                self.run_command(
+                run_cmmd(
                     f'wg set {name} peer {public_key} remove'
                 )
                 allowed_ips = self.wgstate[name]['peers'][public_key]\
                     ['allowed ips']
-                self.run_command(
+                run_cmmd(
                     f'ip -4 route del {allowed_ips} dev {name}'
                 )
-        self.state_interface()
-        self.state_peer()
-        logger.debug('End of executing update!\n\n')
-
-
-
-if __name__ == '__main__':
-
-    sys.path.append(os.path.abspath('/etc/wgconsole'))
-    import config
-
-    DBNAME = config.DBNAME
-    DBUSER = config.DBUSER
-    DBPASS = config.DBPASS
-    DBHOST = config.DBHOST
-    DBPORT = config.DBPORT
-
-    CONF = os.path.abspath('/etc/wgconsole/conf.d')
-    LOGF = os.path.abspath('/var/wgconsole/service.log')
-
-    logging.config.dictConfig({
-        'version':1,
-        'formatters':{
-            'message':{
-                'format':'%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                'datefmt':'%Y.%m.%d %H:%M:%S',
-            },
-        },
-        'handlers':{
-            'console':{
-                'class':'logging.StreamHandler',
-                'formatter':'message',
-            },
-            'file':{
-                'class':'logging.handlers.RotatingFileHandler',
-                'formatter':'message',
-                'filename':f'{LOGF}',
-                'maxBytes': 1024*1024*1,
-                'backupCount': 3,
-            },
-        },
-        'root':{
-            'level':'ERROR',
-            'handlers':['file',],
-        },
-        'disable_existing_loggers':False,
-    })
-    logger = logging.getLogger('wgconsole')
-
-    # Change process name
-    if os.uname()[0] == 'Linux':
-        import ctypes
-        libc = ctypes.cdll.LoadLibrary('libc.so.6')
-        libc.prctl(15, b'wgconsole', None, None, None)
-
-    while True:
-        try:
-            connection = psycopg2.connect(
-                dbname = DBNAME,
-                user = DBUSER,
-                password = DBPASS,
-                host = DBHOST,
-                port = DBPORT
-            )
-        except psycopg2.OperationalError:
-            logger.error('Error connecting to database\n')
-            time.sleep(5)
-            continue
-        wgctrl = WgControl(CONF, connection)
-        wgctrl.update()
-        connection.close()
-        time.sleep(10)
+        logger.debug('End of executing WgControl.update\n\n')

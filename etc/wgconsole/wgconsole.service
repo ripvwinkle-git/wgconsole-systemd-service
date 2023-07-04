@@ -6,8 +6,7 @@ After=multi-user.target
 Type=simple
 Restart=always
 User=root
-ExecStart=/bin/python3 /usr/wgconsole/wgconsole.py
+ExecStart=/bin/python3 /usr/wgconsole/wgservice.py
 
 [Install]
 WantedBy=multi-user.target
-
