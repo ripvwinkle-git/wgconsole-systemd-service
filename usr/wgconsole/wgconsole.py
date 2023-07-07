@@ -291,21 +291,26 @@ class WgSetup:
                     name
                 )
             if 'ListenPort' in conf:
+                class InvalidPort(Exception):
+                    '''
+                    ListenPort must be in range from 0 to 65536.
+                    '''
                 try:
                     conf_port = int(conf['ListenPort'])
-                    if 0 <= conf_port <= 65536:
-                        if conf_port != port:
-                            db_write(
-                                self.conn,
-                                'UPDATE wgconsole_interface\n'
-                                f'SET port = \'{conf["ListenPort"]}\'\n'
-                                f'WHERE name = \'{name}\';'
+                    if conf_port < 0 or conf_port > 65536:
+                        raise InvalidPort(conf_port)
+                    if conf_port != port:
+                        db_write(
+                            self.conn,
+                            'UPDATE wgconsole_interface\n'
+                            f'SET port = \'{conf["ListenPort"]}\'\n'
+                            f'WHERE name = \'{name}\';'
                             )
-                    else:
-                        logger.error(
-                            'ListenPort record in %s.conf out of range\n',
-                            name
-                        )
+                except InvalidPort:
+                    logger.error(
+                        'ListenPort record in %s.conf out of range\n',
+                        name
+                    )
                 except ValueError:
                     logger.error(
                         'ListenPort record in %s.conf not integer\n',
