@@ -26,6 +26,9 @@ if __name__ == '__main__':
     CONF = os.path.abspath('/etc/wgconsole/conf.d')
     LOGF = os.path.abspath('/var/wgconsole/service.log')
 
+    if not os.path.exists(LOGF.rstrip('service.log')):
+        os.makedirs(LOGF.rstrip('service.log'))
+
     logging.config.dictConfig({
         'version':1,
         'formatters':{
